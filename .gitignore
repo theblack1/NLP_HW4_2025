@@ -1,0 +1,17 @@
+# 忽略所有 pycache 缓存文件夹
+__pycache__/
+
+# 忽略所有 .pyc 字节码文件（即使不在 pycache 内）
+*.pyc
+
+# 忽略所有 .pyo 字节码文件（某些解释器也会生成）
+*.pyo
+
+# 忽略所有 .pyd 动态链接库文件（Windows 平台的 Python 扩展模块）
+*.pyd
+
+# 忽略所有 .pdb 调试符号文件（Windows 平台的调试信息）
+*.pdb
+
+# 忽略太大的bin文件
+*.bin
