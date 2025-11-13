@@ -1,3 +1,7 @@
 test.py
 
 checkpoints_test/
+
+debug_one_case.py
+
+*.pt
