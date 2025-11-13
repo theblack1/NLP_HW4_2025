@@ -77,12 +77,23 @@ def get_args():
     return args
 
 def train(args, model, train_loader, dev_loader, optimizer, scheduler):
-    best_f1 = -1
-    epochs_since_improvement = 0
-
+    # Init path
     checkpoint_dir = args.checkpoint_dir
     model_type = args.model_type
     experiment_name = args.experiment_name
+    
+    gt_sql_path = os.path.join(f'data/dev.sql')
+    gt_record_path = os.path.join('records', 'ground_truth_dev.pkl') # Corrected path   
+    model_sql_path = os.path.join(f'results/t5_{model_type}_{experiment_name}_dev.sql')
+    model_record_path = os.path.join(f'records/t5_{model_type}_{experiment_name}_dev.pkl')
+    
+    # Run the eval_epoch for input model to Get best dev F1 so far as initial value
+    eval_loss, record_f1, record_em, sql_em, error_rate = eval_epoch(args, model, dev_loader,
+                                                                     gt_sql_path, model_sql_path,
+                                                                     gt_record_path, model_record_path)
+    best_f1 = record_f1
+    
+    epochs_since_improvement = 0
     
     # Metrics file path for this run
     metrics_path = os.path.join(checkpoint_dir, f"metrics_{args.run_id}.txt")
@@ -90,11 +101,18 @@ def train(args, model, train_loader, dev_loader, optimizer, scheduler):
     with open(metrics_path, "w") as f:
         f.write("epoch,train_loss,dev_loss,record_f1,record_em,sql_em,error_rate,best_f1\n")
     
-    gt_sql_path = os.path.join(f'data/dev.sql')
-    # gt_record_path = os.path.join(f'records/dev_gt_records.pkl') 
-    gt_record_path = os.path.join('records', 'ground_truth_dev.pkl') # Corrected path   
-    model_sql_path = os.path.join(f'results/t5_{model_type}_{experiment_name}_dev.sql')
-    model_record_path = os.path.join(f'records/t5_{model_type}_{experiment_name}_dev.pkl')
+    # Log initial eval before training
+    with open(metrics_path, "a") as f:
+    f.write(
+        f"-1,"          # epoch -1 for initial eval before training
+        f"nan,"         # No training loss yet
+        f"{eval_loss:.6f},"
+        f"{record_f1:.6f},"
+        f"{record_em:.6f},"
+        f"{sql_em:.6f},"
+        f"{error_rate:.6f},"
+        f"{best_f1:.6f}\n"
+    )
     
     for epoch in range(args.max_n_epochs):
         tr_loss = train_epoch(args, model, train_loader, optimizer, scheduler)
