@@ -9,6 +9,8 @@ Example of virtual environment creation using conda:
 ```
 conda create -n hw4-part-2-nlp python=3.10
 conda activate hw4-part-2-nlp
+pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu121
+pip install wandb
 python -m pip install -r requirements.txt
 ```
 

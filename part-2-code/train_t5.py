@@ -12,8 +12,13 @@ from transformers import GenerationConfig
 from load_data import load_t5_data
 from utils import compute_metrics, save_queries_and_records
 
+from transformers import GenerationConfig, T5TokenizerFast
+
+TOKENIZER = T5TokenizerFast.from_pretrained("google-t5/t5-small")
 DEVICE = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-PAD_IDX = 0
+# PAD_IDX = 0
+PAD_IDX = TOKENIZER.pad_token_id
+PAD_VAL = -100  # for ignoring in loss
 
 def get_args():
     '''
@@ -61,7 +66,8 @@ def train(args, model, train_loader, dev_loader, optimizer, scheduler):
     args.checkpoint_dir = checkpoint_dir
     experiment_name = 'ft_experiment'
     gt_sql_path = os.path.join(f'data/dev.sql')
-    gt_record_path = os.path.join(f'records/dev_gt_records.pkl')
+    # gt_record_path = os.path.join(f'records/dev_gt_records.pkl') 
+    gt_record_path = os.path.join('records', 'ground_truth_dev.pkl') # Corrected path   
     model_sql_path = os.path.join(f'results/t5_{model_type}_{experiment_name}_dev.sql')
     model_record_path = os.path.join(f'records/t5_{model_type}_{experiment_name}_dev.pkl')
     for epoch in range(args.max_n_epochs):
@@ -102,7 +108,7 @@ def train_epoch(args, model, train_loader, optimizer, scheduler):
     model.train()
     total_loss = 0
     total_tokens = 0
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(ignore_index=PAD_VAL)
 
     for encoder_input, encoder_mask, decoder_input, decoder_targets, _ in tqdm(train_loader):
         optimizer.zero_grad()
@@ -111,20 +117,27 @@ def train_epoch(args, model, train_loader, optimizer, scheduler):
         decoder_input = decoder_input.to(DEVICE)
         decoder_targets = decoder_targets.to(DEVICE)
 
-        logits = model(
+        outputs = model(
             input_ids=encoder_input,
             attention_mask=encoder_mask,
             decoder_input_ids=decoder_input,
-        )['logits']
+        )
+        logits = outputs["logits"]  # (B, T_dec, V)
 
-        non_pad = decoder_targets != PAD_IDX
-        loss = criterion(logits[non_pad], decoder_targets[non_pad])
+        # non_pad = decoder_targets != PAD_IDX
+        # loss = criterion(logits[non_pad], decoder_targets[non_pad])
+        vocab_size = logits.size(-1)
+        loss = criterion(
+            logits.view(-1, vocab_size),          # (B*T_dec, V)
+            decoder_targets.view(-1),             # (B*T_dec,)
+        )
         loss.backward()
         optimizer.step()
         if scheduler is not None: 
             scheduler.step()
 
         with torch.no_grad():
+            non_pad = decoder_targets != PAD_VAL
             num_tokens = torch.sum(non_pad).item()
             total_loss += loss.item() * num_tokens
             total_tokens += num_tokens
@@ -143,14 +156,131 @@ def eval_epoch(args, model, dev_loader, gt_sql_pth, model_sql_path, gt_record_pa
     '''
     # TODO
     model.eval()
-    return 0, 0, 0, 0, 0
+    # return 0, 0, 0, 0, 0
+    '''
+    Evaluation loop on the dev set.
+
+    Returns:
+        avg_loss, record_f1, record_em, sql_em, error_rate
+    '''
+    model.eval()
+    criterion = nn.CrossEntropyLoss(ignore_index=PAD_VAL)
+
+    total_loss = 0.0
+    total_tokens = 0
+
+    all_pred_sql = []
+
+    # 配一个简单的 generation 配置（你可以按需要改）
+    gen_config = GenerationConfig(
+        max_new_tokens=128,
+        num_beams=4,
+        do_sample=False,
+        early_stopping=True,
+    )
+
+    with torch.no_grad():
+        for encoder_input, encoder_mask, decoder_input, decoder_targets, initial_decoder_inputs in tqdm(dev_loader):
+            encoder_input = encoder_input.to(DEVICE)
+            encoder_mask = encoder_mask.to(DEVICE)
+            decoder_input = decoder_input.to(DEVICE)
+            decoder_targets = decoder_targets.to(DEVICE)
+
+            # 1) 计算 loss
+            outputs = model(
+                input_ids=encoder_input,
+                attention_mask=encoder_mask,
+                decoder_input_ids=decoder_input,
+            )
+            logits = outputs["logits"]  # (B, T_dec, V)
+            vocab_size = logits.size(-1)
+            loss = criterion(
+                logits.view(-1, vocab_size),
+                decoder_targets.view(-1),
+            )
+
+            non_pad = decoder_targets != PAD_VAL
+            num_tokens = non_pad.sum().item()
+            total_loss += loss.item() * max(num_tokens, 1)
+            total_tokens += num_tokens
+
+            # 2) 生成 SQL（greedy / beam search）
+            gen_outputs = model.generate(
+                input_ids=encoder_input,
+                attention_mask=encoder_mask,
+                generation_config=gen_config,
+            )  # (B, T_gen)
+
+            # 3) decode 成字符串，并追加到列表
+            for seq in gen_outputs:
+                text = TOKENIZER.decode(seq, skip_special_tokens=True)
+                all_pred_sql.append(text.strip())
+
+    avg_loss = total_loss / max(total_tokens, 1)
+
+    # 4) 保存预测 SQL 和对应 records
+    save_queries_and_records(all_pred_sql, model_sql_path, model_record_path)
+
+    # 5) 计算指标
+    sql_em, record_em, record_f1, model_error_msgs = compute_metrics(
+        gt_path=gt_sql_pth,
+        model_path=model_sql_path,
+        gt_query_records=gt_record_path,
+        model_query_records=model_record_path
+    )
+
+    if len(model_error_msgs) > 0:
+        num_errors = sum(1 for msg in model_error_msgs if msg is not None and msg != "")
+        error_rate = num_errors / len(model_error_msgs)
+    else:
+        error_rate = 0.0
+
+    # 注意：train() 里期望的顺序是 (eval_loss, record_f1, record_em, sql_em, error_rate)
+    return avg_loss, record_f1, record_em, sql_em, error_rate
         
 def test_inference(args, model, test_loader, model_sql_path, model_record_path):
     '''
     You must implement inference to compute your model's generated SQL queries and its associated 
     database records. Implementation should be very similar to eval_epoch.
     '''
-    pass
+    # pass
+    '''
+    Inference on the test set.
+
+    Generate SQL queries for all test NL inputs and save:
+      - the SQL queries to `model_sql_path`
+      - the corresponding DB records to `model_record_path`
+    '''
+    model.eval()
+    all_pred_sql = []
+
+    # Generation config: keep it the same/similar to eval_epoch
+    gen_config = GenerationConfig(
+        max_new_tokens=128,
+        num_beams=4,
+        do_sample=False,
+        early_stopping=True,
+    )
+
+    with torch.no_grad():
+        for encoder_input, encoder_mask, initial_decoder_inputs in tqdm(test_loader):
+            encoder_input = encoder_input.to(DEVICE)
+            encoder_mask = encoder_mask.to(DEVICE)
+            # initial_decoder_inputs currently we do not explicitly use it, T5 will use its own decoder_start_token_id
+
+            gen_outputs = model.generate(
+                input_ids=encoder_input,
+                attention_mask=encoder_mask,
+                generation_config=gen_config,
+            )  # (B, T_gen)
+
+            for seq in gen_outputs:
+                text = TOKENIZER.decode(seq, skip_special_tokens=True)
+                all_pred_sql.append(text.strip())
+
+    # Save the generated SQL queries and corresponding records
+    save_queries_and_records(all_pred_sql, model_sql_path, model_record_path)
+    
 
 def main():
     # Get key arguments

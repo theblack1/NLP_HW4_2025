@@ -1,7 +1,7 @@
 import os
 
 import torch
-
+import time
 import transformers
 from transformers import T5ForConditionalGeneration, T5Config
 from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
@@ -11,7 +11,32 @@ DEVICE = torch.device('cuda') if torch.cuda.is_available() else torch.device('cp
 
 def setup_wandb(args):
     # Implement this if you wish to use wandb in your experiments
-    pass
+    # pass
+    """
+    Optional helper to initialize Weights & Biases logging.
+
+    We keep it very defensive so that training still works even if some
+    attributes do not exist on `args`.
+    """
+    # You can control these by adding attributes to args in your argument parser,
+    # but we provide reasonable fallbacks so it doesn't crash.
+    project = getattr(args, "wandb_project", "nlp_hw4_t5")
+    default_run_name = time.strftime("run_%Y%m%d_%H%M%S")
+    run_name = getattr(args, "run_name", default_run_name)
+    entity = getattr(args, "wandb_entity", None)
+
+    # Log all arguments as config if possible
+    if hasattr(args, "__dict__"):
+        config = vars(args)
+    else:
+        config = {}
+
+    wandb.init(
+        project=project,
+        name=run_name,
+        entity=entity,
+        config=config,
+    )
 
 def initialize_model(args):
     '''
@@ -20,7 +45,49 @@ def initialize_model(args):
     or training a T5 model initialized with the 'google-t5/t5-small' config
     from scratch.
     '''
-    pass
+    # pass
+    '''
+    Helper function to initialize the model.
+
+    Two modes:
+      1) Finetune the pretrained 'google-t5/t5-small' checkpoint
+      2) (Optional) Train from scratch using the same config, if args.from_scratch / args.train_from_scratch is True
+    '''
+    # Which checkpoint / config to use
+    model_name = getattr(args, "model_name", "google-t5/t5-small")
+
+    # Whether to start from random initialization (for extra credit)
+    train_from_scratch = getattr(args, "from_scratch", False) or getattr(args, "train_from_scratch", False)
+
+    if train_from_scratch:
+        # Same architecture as t5-small, but random weights
+        config = T5Config.from_pretrained(model_name)
+        model = T5ForConditionalGeneration(config)
+    else:
+        # Standard HW setting: finetune the pretrained T5-small
+        model = T5ForConditionalGeneration.from_pretrained(model_name)
+
+    # Optional: freeze some parts of the model if args asks for it
+    # (You can ignore these flags if you never set them in your args)
+    if getattr(args, "freeze_encoder", False):
+        for p in model.encoder.parameters():
+            p.requires_grad = False
+
+    if getattr(args, "freeze_embeddings", False):
+        # Shared token embedding
+        if hasattr(model, "shared"):
+            model.shared.weight.requires_grad = False
+        # Encoder / decoder input embeddings
+        if hasattr(model, "encoder") and hasattr(model.encoder, "embed_tokens"):
+            for p in model.encoder.embed_tokens.parameters():
+                p.requires_grad = False
+        if hasattr(model, "decoder") and hasattr(model.decoder, "embed_tokens"):
+            for p in model.decoder.embed_tokens.parameters():
+                p.requires_grad = False
+
+    # Move to GPU / CPU
+    model.to(DEVICE)
+    return model
 
 def mkdir(dirpath):
     if not os.path.exists(dirpath):
@@ -30,12 +97,59 @@ def mkdir(dirpath):
             pass
 
 def save_model(checkpoint_dir, model, best):
-    # Save model checkpoint to be able to load the model later
-    pass
+    """
+    Save model checkpoint to be able to load the model later.
+
+    Args:
+        checkpoint_dir (str): directory where checkpoints are stored
+        model (nn.Module): T5 model
+        best (bool): if True, save as the "best" checkpoint, otherwise as "last"
+    """
+    mkdir(checkpoint_dir)
+
+    # Decide file name: best vs last
+    filename = "best_model.pt" if best else "last_model.pt"
+    ckpt_path = os.path.join(checkpoint_dir, filename)
+
+    # In case model is wrapped (e.g. DataParallel), unwrap to get actual module
+    model_to_save = model.module if hasattr(model, "module") else model
+    state_dict = model_to_save.state_dict()
+
+    torch.save(state_dict, ckpt_path)
+    print(f"[save_model] Saved checkpoint to {ckpt_path}")
 
 def load_model_from_checkpoint(args, best):
     # Load model from a checkpoint
-    pass
+    # pass
+    """
+    Load model from a checkpoint saved by `save_model`.
+
+    Args:
+        args: argument namespace (should contain checkpoint_dir / model_name etc.)
+        best (bool): if True, load "best" checkpoint, else load "last"
+
+    Returns:
+        model (nn.Module): T5 model loaded with checkpoint weights, moved to DEVICE
+    """
+    # Where checkpoints are stored; fall back to "checkpoints" if not specified
+    checkpoint_dir = getattr(args, "checkpoint_dir", "checkpoints")
+    filename = "best_model.pt" if best else "last_model.pt"
+    ckpt_path = os.path.join(checkpoint_dir, filename)
+
+    if not os.path.exists(ckpt_path):
+        raise FileNotFoundError(f"Checkpoint file not found: {ckpt_path}")
+
+    # First build a fresh model with correct architecture/config
+    model = initialize_model(args)
+
+    # Load weights
+    state_dict = torch.load(ckpt_path, map_location=DEVICE)
+    model.load_state_dict(state_dict)
+
+    model.to(DEVICE)
+    model.eval()  # usually for evaluation; training script可以再手动model.train()
+    print(f"[load_model_from_checkpoint] Loaded checkpoint from {ckpt_path}")
+    return model
 
 def initialize_optimizer_and_scheduler(args, model, epoch_length):
     optimizer = initialize_optimizer(args, model)
