@@ -1,10 +1,12 @@
 import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import argparse
 from tqdm import tqdm
 import time
 
 import torch
 import torch.nn as nn
+from torch.amp import autocast, GradScaler
 import numpy as np
 import wandb
 
@@ -15,12 +17,15 @@ from utils import compute_metrics, save_queries_and_records
 from transformers import GenerationConfig, T5TokenizerFast
 from load_data import BOS_ID
 
+
 MAX_TGT_LEN = 512
 TOKENIZER = T5TokenizerFast.from_pretrained("google-t5/t5-small")
 DEVICE = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 # PAD_IDX = 0
 PAD_IDX = TOKENIZER.pad_token_id
 PAD_VAL = -100  # for ignoring in loss
+
+USE_AMP = (DEVICE.type == "cuda")
 
 def get_args():
     '''
@@ -41,9 +46,9 @@ def get_args():
                         help="Whether to use a LR scheduler and what type to use if so")
     parser.add_argument('--num_warmup_epochs', type=int, default=0,
                         help="How many epochs to warm up the learning rate for if using a scheduler")
-    parser.add_argument('--max_n_epochs', type=int, default=20,
+    parser.add_argument('--max_n_epochs', type=int, default=100,
                         help="How many epochs to train the model for")
-    parser.add_argument('--patience_epochs', type=int, default=10,
+    parser.add_argument('--patience_epochs', type=int, default=5,
                         help="If validation performance stops improving, how many epochs should we wait before stopping?")
 
     parser.add_argument('--use_wandb', action='store_true',
@@ -52,8 +57,21 @@ def get_args():
                         help="How should we name this experiment?")
 
     # Data hyperparameters
-    parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument('--batch_size', type=int, default=16)
     parser.add_argument('--test_batch_size', type=int, default=32)
+    parser.add_argument(
+        '--init_from_checkpoint',
+        type=str,
+        default='',
+        help="If provided, initialize model weights from this .pt checkpoint before training."
+    )
+    # How often to run dev evaluation (in epochs)
+    parser.add_argument(
+        '--eval_every',
+        type=int,
+        default=4,
+        help="Run evaluation on the dev set every N epochs (default: 1, i.e., every epoch)."
+    )
 
     args = parser.parse_args()
     return args
@@ -66,16 +84,47 @@ def train(args, model, train_loader, dev_loader, optimizer, scheduler):
     checkpoint_dir = os.path.join('checkpoints', f'{model_type}_experiments', args.experiment_name)
     os.makedirs(checkpoint_dir, exist_ok=True)
     args.checkpoint_dir = checkpoint_dir
+    
+    # Metrics file path for this run
+    metrics_path = os.path.join(checkpoint_dir, f"metrics_{args.run_id}.txt")
+    # Initialize metrics file
+    with open(metrics_path, "w") as f:
+        f.write("epoch,train_loss,dev_loss,record_f1,record_em,sql_em,error_rate,best_f1\n")
+    
     experiment_name = 'experiment'
     gt_sql_path = os.path.join(f'data/dev.sql')
     # gt_record_path = os.path.join(f'records/dev_gt_records.pkl') 
     gt_record_path = os.path.join('records', 'ground_truth_dev.pkl') # Corrected path   
     model_sql_path = os.path.join(f'results/t5_{model_type}_{experiment_name}_dev.sql')
     model_record_path = os.path.join(f'records/t5_{model_type}_{experiment_name}_dev.pkl')
+    
     for epoch in range(args.max_n_epochs):
         tr_loss = train_epoch(args, model, train_loader, optimizer, scheduler)
         print(f"Epoch {epoch}: Average train loss was {tr_loss}")
+        
+        do_eval = ((epoch + 1) % args.eval_every == 0) or (epoch == args.max_n_epochs - 1)
 
+        if not do_eval:
+            # if not do_eval: only record train loss, save last_model, do not update best_f1 / early stopping
+            print(f"Epoch {epoch}: skipping dev evaluation (eval_every={args.eval_every}/{(epoch + 1) % args.eval_every})")
+
+            if args.use_wandb:
+                wandb.log({'train/loss': tr_loss}, step=epoch)
+
+            # write nan to other metrics
+            with open(metrics_path, "a") as f:
+                f.write(
+                    f"{epoch},"
+                    f"{tr_loss:.6f},"
+                    f"nan,nan,nan,nan,nan,"
+                    f"{best_f1:.6f}\n"
+                )
+
+            # Refresh last model
+            save_model(checkpoint_dir, model, best=False)
+            # Skip the rest of the loop
+            continue
+        
         eval_loss, record_f1, record_em, sql_em, error_rate = eval_epoch(args, model, dev_loader,
                                                                          gt_sql_path, model_sql_path,
                                                                          gt_record_path, model_record_path)
@@ -99,11 +148,35 @@ def train(args, model, train_loader, dev_loader, optimizer, scheduler):
         else:
             epochs_since_improvement += 1
 
+        # Log metrics to file
+        with open(metrics_path, "a") as f:
+            f.write(
+                f"{epoch},"
+                f"{tr_loss:.6f},"
+                f"{eval_loss:.6f},"
+                f"{record_f1:.6f},"
+                f"{record_em:.6f},"
+                f"{sql_em:.6f},"
+                f"{error_rate:.6f},"
+                f"{best_f1:.6f}\n"
+            )
+        
+        # Write last model every epoch
         save_model(checkpoint_dir, model, best=False)
         if epochs_since_improvement == 0:
+            # Refresh best model
             save_model(checkpoint_dir, model, best=True)
+            
+            # Refresh best model with timestamped copy
+            timestamped_best_path = os.path.join(
+                checkpoint_dir,
+                f"best_model_{args.run_id}.pt"
+            )
+            torch.save(model.state_dict(), timestamped_best_path)
+            print(f"[train_t5] Saved timestamped best checkpoint to: {timestamped_best_path}")
 
         if epochs_since_improvement >= args.patience_epochs:
+            print(f"[train_t5] Early stopping triggered after {epochs_since_improvement} eval steps without improvement.")
             break
 
 def train_epoch(args, model, train_loader, optimizer, scheduler):
@@ -111,6 +184,9 @@ def train_epoch(args, model, train_loader, optimizer, scheduler):
     total_loss = 0
     total_tokens = 0
     criterion = nn.CrossEntropyLoss(ignore_index=PAD_VAL)
+    
+    # if using cuda, set up for mixed precision training
+    scaler = GradScaler(enabled=USE_AMP)
 
     for encoder_input, encoder_mask, decoder_input, decoder_targets, _ in tqdm(train_loader, desc="Training"):
         optimizer.zero_grad()
@@ -119,22 +195,42 @@ def train_epoch(args, model, train_loader, optimizer, scheduler):
         decoder_input = decoder_input.to(DEVICE)
         decoder_targets = decoder_targets.to(DEVICE)
 
-        outputs = model(
-            input_ids=encoder_input,
-            attention_mask=encoder_mask,
-            decoder_input_ids=decoder_input,
-        )
-        logits = outputs["logits"]  # (B, T_dec, V)
+        # outputs = model(
+        #     input_ids=encoder_input,
+        #     attention_mask=encoder_mask,
+        #     decoder_input_ids=decoder_input,
+        # )
+        # logits = outputs["logits"]  # (B, T_dec, V)
 
-        # non_pad = decoder_targets != PAD_IDX
-        # loss = criterion(logits[non_pad], decoder_targets[non_pad])
-        vocab_size = logits.size(-1)
-        loss = criterion(
-            logits.view(-1, vocab_size),          # (B*T_dec, V)
-            decoder_targets.view(-1),             # (B*T_dec,)
-        )
-        loss.backward()
-        optimizer.step()
+        # # non_pad = decoder_targets != PAD_IDX
+        # # loss = criterion(logits[non_pad], decoder_targets[non_pad])
+        # vocab_size = logits.size(-1)
+        # loss = criterion(
+        #     logits.view(-1, vocab_size),          # (B*T_dec, V)
+        #     decoder_targets.view(-1),             # (B*T_dec,)
+        # )
+        
+        with autocast(device_type='cuda', enabled=USE_AMP):
+            outputs = model(
+                input_ids=encoder_input,
+                attention_mask=encoder_mask,
+                decoder_input_ids=decoder_input,
+            )
+            logits = outputs["logits"]  # (B, T_dec, V)
+            vocab_size = logits.size(-1)
+            loss = criterion(
+                logits.view(-1, vocab_size),          # (B*T_dec, V)
+                decoder_targets.view(-1),             # (B*T_dec,)
+            )
+        
+        if USE_AMP:
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            optimizer.step()
+            
         if scheduler is not None: 
             scheduler.step()
 
@@ -173,14 +269,13 @@ def eval_epoch(args, model, dev_loader, gt_sql_pth, model_sql_path, gt_record_pa
 
     all_pred_sql = []
 
-    # 配一个简单的 generation 配置（你可以按需要改）
     gen_config = GenerationConfig(
         max_new_tokens=MAX_TGT_LEN,
         num_beams=4,
         do_sample=False,
         early_stopping=True,
     )
-
+    
     with torch.no_grad():
         for encoder_input, encoder_mask, decoder_input, decoder_targets, initial_decoder_inputs in tqdm(dev_loader, desc="Evaluating"):
             encoder_input = encoder_input.to(DEVICE)
@@ -188,42 +283,44 @@ def eval_epoch(args, model, dev_loader, gt_sql_pth, model_sql_path, gt_record_pa
             decoder_input = decoder_input.to(DEVICE)
             decoder_targets = decoder_targets.to(DEVICE)
 
-            # 1) 计算 loss
-            outputs = model(
-                input_ids=encoder_input,
-                attention_mask=encoder_mask,
-                decoder_input_ids=decoder_input,
-            )
-            logits = outputs["logits"]  # (B, T_dec, V)
-            vocab_size = logits.size(-1)
-            loss = criterion(
-                logits.view(-1, vocab_size),
-                decoder_targets.view(-1),
-            )
+            # 1) Forward pass to compute loss
+            
+            with autocast(device_type='cuda', enabled=USE_AMP):
+                outputs = model(
+                    input_ids=encoder_input,
+                    attention_mask=encoder_mask,
+                    decoder_input_ids=decoder_input,
+                )
+                logits = outputs["logits"]  # (B, T_dec, V)
+                vocab_size = logits.size(-1)
+                loss = criterion(
+                    logits.view(-1, vocab_size),
+                    decoder_targets.view(-1),
+                )
 
-            non_pad = decoder_targets != PAD_VAL
-            num_tokens = non_pad.sum().item()
-            total_loss += loss.item() * max(num_tokens, 1)
-            total_tokens += num_tokens
+                non_pad = decoder_targets != PAD_VAL
+                num_tokens = non_pad.sum().item()
+                total_loss += loss.item() * max(num_tokens, 1)
+                total_tokens += num_tokens
 
-            # 2) 生成 SQL（greedy / beam search）
-            gen_outputs = model.generate(
-                input_ids=encoder_input,
-                attention_mask=encoder_mask,
-                generation_config=gen_config,
-            )  # (B, T_gen)
+                # 2) Generate SQL queries
+                gen_outputs = model.generate(
+                    input_ids=encoder_input,
+                    attention_mask=encoder_mask,
+                    generation_config=gen_config,
+                )  # (B, T_gen)
 
-            # 3) decode 成字符串，并追加到列表
+            # 3) Decode generated sequences into strings and append to list
             for seq in gen_outputs:
                 text = TOKENIZER.decode(seq, skip_special_tokens=True)
                 all_pred_sql.append(text.strip())
 
     avg_loss = total_loss / max(total_tokens, 1)
 
-    # 4) 保存预测 SQL 和对应 records
+    # 4) Save the predicted SQL queries and corresponding records
     save_queries_and_records(all_pred_sql, model_sql_path, model_record_path)
 
-    # 5) 计算指标
+    # 5) Compute metrics
     sql_em, record_em, record_f1, model_error_msgs = compute_metrics(
         gt_path=gt_sql_pth,
         model_path=model_sql_path,
@@ -237,7 +334,6 @@ def eval_epoch(args, model, dev_loader, gt_sql_pth, model_sql_path, gt_record_pa
     else:
         error_rate = 0.0
 
-    # 注意：train() 里期望的顺序是 (eval_loss, record_f1, record_em, sql_em, error_rate)
     return avg_loss, record_f1, record_em, sql_em, error_rate
         
 def test_inference(args, model, test_loader, model_sql_path, model_record_path):
@@ -287,6 +383,10 @@ def test_inference(args, model, test_loader, model_sql_path, model_record_path):
 def main():
     # Get key arguments
     args = get_args()
+    
+    args.run_id = time.strftime("%Y%m%d-%H%M%S")
+    print(f"[train_t5] This run_id = {args.run_id}")
+    
     if args.use_wandb:
         # Recommended: Using wandb (or tensorboard) for result logging can make experimentation easier
         setup_wandb(args)
@@ -295,6 +395,15 @@ def main():
     train_loader, dev_loader, test_loader = load_t5_data(args.batch_size, args.test_batch_size)
     model = initialize_model(args)
     model.config.decoder_start_token_id = BOS_ID
+    
+    if getattr(args, "init_from_checkpoint", ""):
+        ckpt_path = args.init_from_checkpoint
+        if not os.path.isfile(ckpt_path):
+            raise FileNotFoundError(f"[train_t5] init_from_checkpoint not found: {ckpt_path}")
+        state_dict = torch.load(ckpt_path, map_location=DEVICE, weights_only=True)
+        model.load_state_dict(state_dict)
+        print(f"[train_t5] Initialized model weights from checkpoint: {ckpt_path}")
+    
     optimizer, scheduler = initialize_optimizer_and_scheduler(args, model, len(train_loader))
 
     # Train 
@@ -305,19 +414,20 @@ def main():
     model.config.decoder_start_token_id = BOS_ID
     model.eval()
     
-    # Dev set
+    # setup paths
     experiment_name = 'experiment'
     model_type = 'ft' if args.finetune else 'scr'
     
-    gt_sql_path = os.path.join(f'data/dev.sql')
-    gt_record_path = os.path.join(f'records/ground_truth_dev.pkl')
-    model_sql_path = os.path.join(f'results/t5_{model_type}_{experiment_name}_dev.sql')
-    model_record_path = os.path.join(f'records/t5_{model_type}_{experiment_name}_dev.pkl')
-    dev_loss, dev_record_f1, dev_record_em, dev_sql_em, dev_error_rate = eval_epoch(args, model, dev_loader,
-                                                                                    gt_sql_path, model_sql_path,
-                                                                                    gt_record_path, model_record_path)
-    print(f"Dev set results: Loss: {dev_loss}, Record F1: {dev_record_f1}, Record EM: {dev_record_em}, SQL EM: {dev_sql_em}")
-    print(f"Dev set results: {dev_error_rate*100:.2f}% of the generated outputs led to SQL errors")
+    # # Dev set
+    # gt_sql_path = os.path.join(f'data/dev.sql')
+    # gt_record_path = os.path.join(f'records/ground_truth_dev.pkl')
+    # model_sql_path = os.path.join(f'results/t5_{model_type}_{experiment_name}_dev.sql')
+    # model_record_path = os.path.join(f'records/t5_{model_type}_{experiment_name}_dev.pkl')
+    # dev_loss, dev_record_f1, dev_record_em, dev_sql_em, dev_error_rate = eval_epoch(args, model, dev_loader,
+    #                                                                                 gt_sql_path, model_sql_path,
+    #                                                                                 gt_record_path, model_record_path)
+    # print(f"Dev set results: Loss: {dev_loss}, Record F1: {dev_record_f1}, Record EM: {dev_record_em}, SQL EM: {dev_sql_em}")
+    # print(f"Dev set results: {dev_error_rate*100:.2f}% of the generated outputs led to SQL errors")
 
     # Test set
     model_sql_path = os.path.join(f'results/t5_{model_type}_{experiment_name}_test.sql')

@@ -144,7 +144,7 @@ def load_model_from_checkpoint(args, best):
     model = initialize_model(args)
 
     # Load weights
-    state_dict = torch.load(ckpt_path, map_location=DEVICE)
+    state_dict = torch.load(ckpt_path, map_location=DEVICE, weights_only=True)
     model.load_state_dict(state_dict)
 
     model.to(DEVICE)

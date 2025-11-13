@@ -6,7 +6,7 @@ import pickle
 import random
 from tqdm import tqdm
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 from typing import List, Any
 
 import torch
@@ -83,32 +83,27 @@ def read_queries(sql_path: str):
     return qs
 
 def compute_records(processed_qs: List[str]):
-    '''
-    Helper function for computing the records associated with each SQL query in the
-    input list. You may change the number of threads or the timeout variable (in seconds)
-    based on your computational constraints.
-
-    Input:
-        * processed_qs (List[str]): The list of SQL queries to execute
-    '''
     num_threads = 10
-    timeout_secs = 120
+    per_query_timeout_secs = 120
 
-    pool = ThreadPoolExecutor(num_threads)
-    futures = []
-    for i, query in enumerate(processed_qs):
-        futures.append(pool.submit(compute_record, i, query))
-        
-    rec_dict = {}
-    try:
-        for x in tqdm(as_completed(futures, timeout=timeout_secs), desc="Computing Records", total=len(processed_qs)):
-            query_id, rec, error_msg = x.result()
-            rec_dict[query_id] = (rec, error_msg)
-    except:
-        for future in futures:
-            if not future.done():
-                future.cancel()
-            
+    with ThreadPoolExecutor(num_threads) as pool:
+        futures = {
+            pool.submit(compute_record, i, query): i
+            for i, query in enumerate(processed_qs)
+        }
+
+        rec_dict = {}
+
+        for f in tqdm(as_completed(futures), desc="Computing Records", total=len(processed_qs)):
+            i = futures[f]
+            try:
+                query_id, rec, error_msg = f.result(timeout=per_query_timeout_secs)
+                rec_dict[query_id] = (rec, error_msg)
+            except TimeoutError:
+                rec_dict[i] = ([], "Query timed out")
+            except Exception as e:
+                rec_dict[i] = ([], f"Exception in compute_record: {e}")
+
     recs = []
     error_msgs = []
     for i in range(len(processed_qs)):
@@ -118,8 +113,8 @@ def compute_records(processed_qs: List[str]):
             error_msgs.append(error_msg)
         else:
             recs.append([])
-            error_msgs.append("Query timed out")
-            
+            error_msgs.append("Unknown error")
+
     return recs, error_msgs
 
 def compute_record(query_id, query):

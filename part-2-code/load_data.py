@@ -191,8 +191,17 @@ def get_dataloader(batch_size, split):
     dset = T5Dataset(data_folder, split)
     shuffle = split == "train"
     collate_fn = normal_collate_fn if split != "test" else test_collate_fn
+    num_workers = cpu_count = os.cpu_count() or 1
 
-    dataloader = DataLoader(dset, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_fn)
+    dataloader = DataLoader(
+        dset, 
+        batch_size=batch_size, 
+        shuffle=shuffle, 
+        collate_fn=collate_fn,
+        num_workers=4,
+        pin_memory=True,
+    )
+    
     return dataloader
 
 def load_t5_data(batch_size, test_batch_size):
