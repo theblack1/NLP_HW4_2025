@@ -7,7 +7,7 @@ from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
 
 import nltk
-nltk.download('punkt')
+# nltk.download('punkt')
 from transformers import T5TokenizerFast
 import torch
 

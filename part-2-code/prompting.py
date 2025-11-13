@@ -236,6 +236,7 @@ def main():
     train_x, train_y, dev_x, dev_y, test_x = load_prompting_data(data_folder)
     
     # expose training examples to create_prompt (for k-shot)
+    global TRAIN_X, TRAIN_Y
     TRAIN_X, TRAIN_Y = train_x, train_y
     
     # Model and tokenizer
@@ -254,9 +255,9 @@ def main():
         model_record_path = os.path.join("records", f"gemma_{experiment_name}_{eval_split}.pkl")
         save_queries_and_records(extracted_queries, model_sql_path, model_record_path)
 
-        gt_query_records = f"records/{eval_split}_gt_records.pkl"
-        gt_sql_path = os.path.join(f'data/{eval_split}.sql')
-        gt_record_path = os.path.join(f'records/{eval_split}_gt_records.pkl')
+        # gt_query_records = f"records/{eval_split}_gt_records.pkl"
+        # gt_sql_path = os.path.join(f'data/{eval_split}.sql')
+        # gt_record_path = os.path.join(f'records/{eval_split}_gt_records.pkl')
         
         if eval_split == "dev":
             # ---- Only dev has ground truth, so we can compute metrics and save logs ----
