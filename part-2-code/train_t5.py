@@ -48,7 +48,7 @@ def get_args():
                         help="How many epochs to warm up the learning rate for if using a scheduler")
     parser.add_argument('--max_n_epochs', type=int, default=100,
                         help="How many epochs to train the model for")
-    parser.add_argument('--patience_epochs', type=int, default=5,
+    parser.add_argument('--patience_epochs', type=int, default=10,
                         help="If validation performance stops improving, how many epochs should we wait before stopping?")
 
     parser.add_argument('--use_wandb', action='store_true',
@@ -80,10 +80,9 @@ def train(args, model, train_loader, dev_loader, optimizer, scheduler):
     best_f1 = -1
     epochs_since_improvement = 0
 
-    model_type = 'ft' if args.finetune else 'scr'
-    checkpoint_dir = os.path.join('checkpoints', f'{model_type}_experiments', args.experiment_name)
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    args.checkpoint_dir = checkpoint_dir
+    checkpoint_dir = args.checkpoint_dir
+    model_type = args.model_type
+    experiment_name = args.experiment_name
     
     # Metrics file path for this run
     metrics_path = os.path.join(checkpoint_dir, f"metrics_{args.run_id}.txt")
@@ -91,7 +90,6 @@ def train(args, model, train_loader, dev_loader, optimizer, scheduler):
     with open(metrics_path, "w") as f:
         f.write("epoch,train_loss,dev_loss,record_f1,record_em,sql_em,error_rate,best_f1\n")
     
-    experiment_name = 'experiment'
     gt_sql_path = os.path.join(f'data/dev.sql')
     # gt_record_path = os.path.join(f'records/dev_gt_records.pkl') 
     gt_record_path = os.path.join('records', 'ground_truth_dev.pkl') # Corrected path   
@@ -396,6 +394,16 @@ def main():
     model = initialize_model(args)
     model.config.decoder_start_token_id = BOS_ID
     
+    # setup paths
+    model_type = 'ft' if args.finetune else 'scr'
+    experiment_name = 'experiment'
+    checkpoint_dir = os.path.join('checkpoints', f'{model_type}_experiments', args.experiment_name)
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    
+    args.model_type = model_type
+    args.experiment_name = experiment_name
+    args.checkpoint_dir = checkpoint_dir
+
     if getattr(args, "init_from_checkpoint", ""):
         ckpt_path = args.init_from_checkpoint
         if not os.path.isfile(ckpt_path):
@@ -403,6 +411,9 @@ def main():
         state_dict = torch.load(ckpt_path, map_location=DEVICE, weights_only=True)
         model.load_state_dict(state_dict)
         print(f"[train_t5] Initialized model weights from checkpoint: {ckpt_path}")
+        # save to best_model (refresh)
+        save_model(checkpoint_dir, model, best=True)
+
     
     optimizer, scheduler = initialize_optimizer_and_scheduler(args, model, len(train_loader))
 
@@ -413,10 +424,6 @@ def main():
     model = load_model_from_checkpoint(args, best=True)
     model.config.decoder_start_token_id = BOS_ID
     model.eval()
-    
-    # setup paths
-    experiment_name = 'experiment'
-    model_type = 'ft' if args.finetune else 'scr'
     
     # # Dev set
     # gt_sql_path = os.path.join(f'data/dev.sql')
