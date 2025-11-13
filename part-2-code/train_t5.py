@@ -40,15 +40,15 @@ def get_args():
     parser.add_argument('--optimizer_type', type=str, default="AdamW", choices=["AdamW"],
                         help="What optimizer to use")
     parser.add_argument('--learning_rate', type=float, default=3e-4)
-    parser.add_argument('--weight_decay', type=float, default=0)
+    parser.add_argument('--weight_decay', type=float, default=0.01)
 
     parser.add_argument('--scheduler_type', type=str, default="cosine", choices=["none", "cosine", "linear"],
                         help="Whether to use a LR scheduler and what type to use if so")
-    parser.add_argument('--num_warmup_epochs', type=int, default=0,
+    parser.add_argument('--num_warmup_epochs', type=int, default=1,
                         help="How many epochs to warm up the learning rate for if using a scheduler")
-    parser.add_argument('--max_n_epochs', type=int, default=100,
+    parser.add_argument('--max_n_epochs', type=int, default=50,
                         help="How many epochs to train the model for")
-    parser.add_argument('--patience_epochs', type=int, default=10,
+    parser.add_argument('--patience_epochs', type=int, default=20,
                         help="If validation performance stops improving, how many epochs should we wait before stopping?")
 
     parser.add_argument('--use_wandb', action='store_true',
@@ -69,7 +69,7 @@ def get_args():
     parser.add_argument(
         '--eval_every',
         type=int,
-        default=4,
+        default=2,
         help="Run evaluation on the dev set every N epochs (default: 1, i.e., every epoch)."
     )
 
@@ -285,12 +285,20 @@ def eval_epoch(args, model, dev_loader, gt_sql_pth, model_sql_path, gt_record_pa
 
     all_pred_sql = []
 
+    # gen_config = GenerationConfig(
+    #     max_new_tokens=MAX_TGT_LEN,
+    #     num_beams=4,
+    #     do_sample=False,
+    #     early_stopping=True,
+    # )
+
     gen_config = GenerationConfig(
         max_new_tokens=MAX_TGT_LEN,
-        num_beams=4,
-        do_sample=False,
+        num_beams=8,
+        # do_sample=False,
         early_stopping=True,
     )
+    
     
     with torch.no_grad():
         for encoder_input, encoder_mask, decoder_input, decoder_targets, initial_decoder_inputs in tqdm(dev_loader, desc="Evaluating"):
@@ -369,10 +377,16 @@ def test_inference(args, model, test_loader, model_sql_path, model_record_path):
     all_pred_sql = []
 
     # Generation config: keep it the same/similar to eval_epoch
+    # gen_config = GenerationConfig(
+    #     max_new_tokens=MAX_TGT_LEN,
+    #     num_beams=4,
+    #     do_sample=False,
+    #     early_stopping=True,
+    # )
     gen_config = GenerationConfig(
         max_new_tokens=MAX_TGT_LEN,
-        num_beams=4,
-        do_sample=False,
+        num_beams=8,
+        # do_sample=False,
         early_stopping=True,
     )
 
