@@ -103,16 +103,16 @@ def train(args, model, train_loader, dev_loader, optimizer, scheduler):
     
     # Log initial eval before training
     with open(metrics_path, "a") as f:
-    f.write(
-        f"-1,"          # epoch -1 for initial eval before training
-        f"nan,"         # No training loss yet
-        f"{eval_loss:.6f},"
-        f"{record_f1:.6f},"
-        f"{record_em:.6f},"
-        f"{sql_em:.6f},"
-        f"{error_rate:.6f},"
-        f"{best_f1:.6f}\n"
-    )
+        f.write(
+            f"-1,"          # epoch -1 for initial eval before training
+            f"nan,"         # No training loss yet
+            f"{eval_loss:.6f},"
+            f"{record_f1:.6f},"
+            f"{record_em:.6f},"
+            f"{sql_em:.6f},"
+            f"{error_rate:.6f},"
+            f"{best_f1:.6f}\n"
+        )
     
     for epoch in range(args.max_n_epochs):
         tr_loss = train_epoch(args, model, train_loader, optimizer, scheduler)
