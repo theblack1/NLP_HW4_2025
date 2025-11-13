@@ -157,7 +157,8 @@ def initialize_optimizer_and_scheduler(args, model, epoch_length):
     return optimizer, scheduler
 
 def initialize_optimizer(args, model):
-    decay_parameters = get_parameter_names(model, transformers.pytorch_utils.ALL_LAYERNORM_LAYERS)
+    # decay_parameters = get_parameter_names(model, transformers.pytorch_utils.ALL_LAYERNORM_LAYERS)
+    decay_parameters = get_parameter_names(model, ALL_LAYERNORM_LAYERS)
     decay_parameters = [name for name in decay_parameters if "bias" not in name]
     optimizer_grouped_parameters = [
         {

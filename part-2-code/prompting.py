@@ -213,6 +213,9 @@ def initialize_model_and_tokenizer(model_name, to_quantize=False):
         else:
             model = AutoModelForCausalLM.from_pretrained(model_id,
                                                         torch_dtype=torch.bfloat16).to(DEVICE)
+    else:
+        raise ValueError(f"Unknown model name: {model_name}")
+    
     return tokenizer, model
 
 

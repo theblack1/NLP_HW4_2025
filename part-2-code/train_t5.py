@@ -8,7 +8,6 @@ import numpy as np
 import wandb
 
 from t5_utils import initialize_model, initialize_optimizer_and_scheduler, save_model, load_model_from_checkpoint, setup_wandb
-from transformers import GenerationConfig
 from load_data import load_t5_data
 from utils import compute_metrics, save_queries_and_records
 
@@ -40,9 +39,9 @@ def get_args():
                         help="Whether to use a LR scheduler and what type to use if so")
     parser.add_argument('--num_warmup_epochs', type=int, default=0,
                         help="How many epochs to warm up the learning rate for if using a scheduler")
-    parser.add_argument('--max_n_epochs', type=int, default=0,
+    parser.add_argument('--max_n_epochs', type=int, default=20,
                         help="How many epochs to train the model for")
-    parser.add_argument('--patience_epochs', type=int, default=0,
+    parser.add_argument('--patience_epochs', type=int, default=10,
                         help="If validation performance stops improving, how many epochs should we wait before stopping?")
 
     parser.add_argument('--use_wandb', action='store_true',
@@ -65,7 +64,7 @@ def train(args, model, train_loader, dev_loader, optimizer, scheduler):
     checkpoint_dir = os.path.join('checkpoints', f'{model_type}_experiments', args.experiment_name)
     os.makedirs(checkpoint_dir, exist_ok=True)
     args.checkpoint_dir = checkpoint_dir
-    experiment_name = 'ft_experiment'
+    experiment_name = 'experiment'
     gt_sql_path = os.path.join(f'data/dev.sql')
     # gt_record_path = os.path.join(f'records/dev_gt_records.pkl') 
     gt_record_path = os.path.join('records', 'ground_truth_dev.pkl') # Corrected path   
@@ -305,8 +304,9 @@ def main():
     model.eval()
     
     # Dev set
-    experiment_name = 'ft_experiment'
+    experiment_name = 'experiment'
     model_type = 'ft' if args.finetune else 'scr'
+    
     gt_sql_path = os.path.join(f'data/dev.sql')
     gt_record_path = os.path.join(f'records/ground_truth_dev.pkl')
     model_sql_path = os.path.join(f'results/t5_{model_type}_{experiment_name}_dev.sql')
