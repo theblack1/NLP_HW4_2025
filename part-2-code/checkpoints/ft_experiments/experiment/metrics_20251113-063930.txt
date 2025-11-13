@@ -1,0 +1,4 @@
+epoch,train_loss,dev_loss,record_f1,record_em,sql_em,error_rate,best_f1
+0,0.089823,nan,nan,nan,nan,nan,-1.000000
+1,0.063120,nan,nan,nan,nan,nan,-1.000000
+2,0.050366,nan,nan,nan,nan,nan,-1.000000

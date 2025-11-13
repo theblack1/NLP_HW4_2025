@@ -1,5 +1,9 @@
 import sqlite3
 import numpy as np
+import multiprocessing as mp
+import time
+from typing import List
+from queue import Empty
 import os
 import re
 import pickle
@@ -82,38 +86,97 @@ def read_queries(sql_path: str):
         qs = [q.strip() for q in f.readlines()]
     return qs
 
+def _worker(idx: int, query: str, result_queue: mp.Queue):
+    """Run compute_record in a separate process and report back the result."""
+    try:
+        # compute_record must be importable / defined at top level
+        query_id, rec, error_msg = compute_record(idx, query)
+        result_queue.put((idx, query_id, rec, error_msg, None))
+    except Exception as e:
+        # Return the exception message as error_msg
+        result_queue.put((idx, None, [], f"Exception in compute_record: {e}", repr(e)))
+
 def compute_records(processed_qs: List[str]):
-    num_threads = 10
-    per_query_timeout_secs = 120
+    num_workers = 10               # Max concurrent processes
+    per_query_timeout_secs = 120   # Per-query timeout
 
-    with ThreadPoolExecutor(num_threads) as pool:
-        futures = {
-            pool.submit(compute_record, i, query): i
-            for i, query in enumerate(processed_qs)
-        }
+    n = len(processed_qs)
+    recs: List[List] = [[] for _ in range(n)]
+    error_msgs: List[str] = ["Unknown error" for _ in range(n)]
 
-        rec_dict = {}
+    if n == 0:
+        return recs, error_msgs
 
-        for f in tqdm(as_completed(futures), desc="Computing Records", total=len(processed_qs)):
-            i = futures[f]
+    result_queue: mp.Queue = mp.Queue()
+
+    # active: idx -> (proc, start_time)
+    active = {}
+    next_to_start = 0
+    finished = set()
+
+    pbar = tqdm(total=n, desc="Computing Records")
+
+    try:
+        while len(finished) < n:
+            # 1) Start new workers while we have capacity
+            while next_to_start < n and len(active) < num_workers:
+                idx = next_to_start
+                p = mp.Process(target=_worker, args=(idx, processed_qs[idx], result_queue))
+                p.daemon = True  # Do not block interpreter exit
+                p.start()
+                active[idx] = (p, time.monotonic())
+                next_to_start += 1
+
+            # 2) Check timeouts and clean up timed-out processes
+            now = time.monotonic()
+            for idx in list(active.keys()):
+                if idx in finished:
+                    continue
+                proc, start_time = active[idx]
+                elapsed = now - start_time
+                if elapsed > per_query_timeout_secs:
+                    # Kill the stuck process
+                    if proc.is_alive():
+                        proc.terminate()
+                    proc.join(timeout=1.0)
+                    recs[idx] = []
+                    error_msgs[idx] = "Query timed out"
+                    finished.add(idx)
+                    del active[idx]
+                    pbar.update(1)
+
+            # 3) Drain results without blocking
             try:
-                query_id, rec, error_msg = f.result(timeout=per_query_timeout_secs)
-                rec_dict[query_id] = (rec, error_msg)
-            except TimeoutError:
-                rec_dict[i] = ([], "Query timed out")
-            except Exception as e:
-                rec_dict[i] = ([], f"Exception in compute_record: {e}")
+                while True:
+                    idx, query_id, rec, error_msg, _exc_repr = result_queue.get_nowait()
+                    # Skip if we already marked this index as finished by timeout
+                    if idx in finished:
+                        continue
+                    recs[idx] = rec
+                    error_msgs[idx] = error_msg
+                    finished.add(idx)
 
-    recs = []
-    error_msgs = []
-    for i in range(len(processed_qs)):
-        if i in rec_dict:
-            rec, error_msg = rec_dict[i]
-            recs.append(rec)
-            error_msgs.append(error_msg)
-        else:
-            recs.append([])
-            error_msgs.append("Unknown error")
+                    # Clean up process if it is still around
+                    proc, _start_time = active.pop(idx, (None, None))
+                    if proc is not None and proc.is_alive():
+                        proc.join(timeout=1.0)
+
+                    pbar.update(1)
+            except Empty:
+                # No more results for now
+                pass
+
+            # 4) Small sleep to avoid busy loop
+            if len(finished) < n:
+                time.sleep(0.05)
+    finally:
+        pbar.close()
+
+        # Best-effort cleanup of any remaining processes
+        for idx, (proc, _start_time) in active.items():
+            if proc.is_alive():
+                proc.terminate()
+            proc.join(timeout=1.0)
 
     return recs, error_msgs
 
