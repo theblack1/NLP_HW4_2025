@@ -40,13 +40,19 @@ def word_tokens_plain(s: str):
     # “未预处理”：按空格切分，保留大小写与标点
     return s.split()
 
-def before_stats(split):
+def before_stats(tokenizer: T5TokenizerFast, split):
     nl, sql = gather(split)
     n_examples = len(nl)
-    nl_lens = [len(word_tokens_plain(x)) for x in nl]
-    sql_lens = [len(word_tokens_plain(y)) for y in sql]
-    vocab_nl  = set(t for x in nl  for t in word_tokens_plain(x))
-    vocab_sql = set(t for y in sql for t in word_tokens_plain(y))
+    # 不加 prefix，不截断，保留原始文本
+    enc = tokenizer(nl, add_special_tokens=True, truncation=False, padding=False)
+    dec = tokenizer(sql, add_special_tokens=True, truncation=False, padding=False)
+
+    nl_lens = [len(x) for x in enc["input_ids"]]
+    sql_lens = [len(y) for y in dec["input_ids"]]
+
+    vocab_nl  = set(t for seq in enc["input_ids"] for t in seq)
+    vocab_sql = set(t for seq in dec["input_ids"] for t in seq)
+
     return {
         "n_examples": n_examples,
         "mean_sentence_len": mean(nl_lens) if nl_lens else 0.0,
@@ -121,14 +127,15 @@ def print_table_after(model_name, tr, dv):
 # Main
 # --------------------
 if __name__ == "__main__":
-    # BEFORE
-    tr_b = before_stats("train")
-    dv_b = before_stats("dev")
-    # AFTER
     tok = T5TokenizerFast.from_pretrained(MODEL_NAME)
+
+    # BEFORE: 原始 NL / SQL，用 T5 tokenizer，无 prefix、无截断
+    tr_b = before_stats(tok, "train")
+    dv_b = before_stats(tok, "dev")
+
+    # AFTER: 训练用设置（加 prefix + 截断）
     tr_a = after_stats(tok, "train")
     dv_a = after_stats(tok, "dev")
 
-    # 输出 LaTeX
     print_table_before(tr_b, dv_b)
     print_table_after("T5 fine-tuned model", tr_a, dv_a)
