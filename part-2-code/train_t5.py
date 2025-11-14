@@ -40,7 +40,7 @@ def get_args():
     parser.add_argument('--optimizer_type', type=str, default="AdamW", choices=["AdamW"],
                         help="What optimizer to use")
     parser.add_argument('--learning_rate', type=float, default=3e-4)
-    parser.add_argument('--weight_decay', type=float, default=0.01)
+    parser.add_argument('--weight_decay', type=float, default=0.0)
 
     parser.add_argument('--scheduler_type', type=str, default="cosine", choices=["none", "cosine", "linear"],
                         help="Whether to use a LR scheduler and what type to use if so")
@@ -69,7 +69,7 @@ def get_args():
     parser.add_argument(
         '--eval_every',
         type=int,
-        default=2,
+        default=4,
         help="Run evaluation on the dev set every N epochs (default: 1, i.e., every epoch)."
     )
 
